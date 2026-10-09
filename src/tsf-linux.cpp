@@ -31,6 +31,7 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <net/if.h>
+#include <time.h>
 #include <unistd.h>
 
 namespace drc {
@@ -74,6 +75,26 @@ int GetInterfaceOfIpv4(const std::string& addr, std::string* out) {
 
 int GetTsf(u64 *tsf) {
   static int fd = -1;
+  // Fallback when the drc-mac80211 TSF sysfs patch is not loaded
+  // (e.g. stock Ubuntu 24.04 kernels) or the driver implements no
+  // .get_tsf op (true of mt76x2u in mainline: no TSF symbol in
+  // /proc/kallsyms). The GamePad video timestamps only need a
+  // monotonically increasing microsecond counter; A/V lip-sync is
+  // irrelevant here because the pc2drc pipeline carries no audio.
+  static bool use_monotonic_fallback = false;
+  static u64 monotonic_base = 0;
+
+  if (use_monotonic_fallback) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    u64 mono_us = (u64)now.tv_sec * 1000000ULL + (u64)now.tv_nsec / 1000ULL;
+    if (monotonic_base == 0) {
+      monotonic_base = mono_us;
+    }
+    // Keep the epoch small like a real TSF counter started at boot.
+    *tsf = mono_us - monotonic_base;
+    return 0;
+  }
 
   if (fd == -1) {
     std::string drc_if;
@@ -89,7 +110,11 @@ int GetTsf(u64 *tsf) {
     }
 
     if (fd == -1) {
-      return -1;
+      // No kernel TSF export: switch permanently to the monotonic clock
+      // instead of returning -1 (callers ignore the return value and
+      // would otherwise timestamp video with uninitialized memory).
+      use_monotonic_fallback = true;
+      return GetTsf(tsf);
     }
   }
   if (pread(fd, tsf, sizeof (*tsf), 0) != sizeof (*tsf)) {
