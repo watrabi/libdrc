@@ -27,6 +27,7 @@
 #include <drc/input.h>
 #include <drc/pixel-format.h>
 #include <drc/types.h>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>

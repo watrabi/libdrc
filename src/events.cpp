@@ -24,6 +24,7 @@
 
 #include <array>
 #include <cassert>
+#include <cstdio>
 #include <cstring>
 #include <drc/internal/events.h>
 #include <drc/types.h>
