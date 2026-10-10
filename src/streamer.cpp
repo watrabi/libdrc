@@ -23,8 +23,11 @@
 // POSSIBILITY OF SUCH DAMAGE.
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <chrono>
+#include <thread>
 #include <drc/internal/audio-streamer.h>
 #include <drc/internal/cmd-protocol.h>
 #include <drc/internal/device-config.h>
@@ -105,7 +108,13 @@ bool Streamer::Start() {
         msg_total++;
         if (msg.size() == 4 && !memcmp(msg.data(), "\1\0\0\0", 4)) {
           msg_resync++;
-          vid_streamer_->ResyncStream();
+          // DRC_IGNORE_RESYNC=1 treats these as per-frame ACKs instead of
+          // resync demands (experiment: honoring every one forces IDR on
+          // every frame, which the GamePad may not be able to display).
+          static bool ignore_resync = getenv("DRC_IGNORE_RESYNC") != nullptr;
+          if (!ignore_resync) {
+            vid_streamer_->ResyncStream();
+          }
         } else {
           msg_other++;
           fprintf(stderr, "MSG: %zu bytes:", msg.size());
@@ -139,11 +148,27 @@ bool Streamer::Start() {
     return false;
   }
 
+  // The GamePad is often absent at Start time (it joins later); the
+  // one-shot SyncUICConfig above then fails silently and touch
+  // calibration is never applied. Retry in the background until the
+  // GamePad answers, so late joiners still get calibrated input.
+  std::thread([this]() {
+    for (int i = 0; i < 120; ++i) {
+      if (stopping_) {
+        return;
+      }
+      if (SyncUICConfig(true)) {
+        return;
+      }
+      std::this_thread::sleep_for(std::chrono::seconds(5));
+    }
+  }).detach();
   SyncUICConfig();
   return true;
 }
 
 void Streamer::Stop() {
+  stopping_ = true;
   uvcuac_synchronizer_->Stop();
   input_receiver_->Stop();
   vid_streamer_->Stop();

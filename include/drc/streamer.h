@@ -27,6 +27,7 @@
 #include <drc/input.h>
 #include <drc/pixel-format.h>
 #include <drc/types.h>
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <string>
@@ -134,6 +135,9 @@ class Streamer {
   std::unique_ptr<InputReceiver> input_receiver_;
   std::unique_ptr<UvcUacStateSynchronizer> uvcuac_synchronizer_;
   std::unique_ptr<DeviceConfig> device_config_;
+
+  // Set by Stop(); the UIC retry thread exits when set (or after 10min).
+  std::atomic<bool> stopping_{false};
 };
 
 }  // namespace drc
