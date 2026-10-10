@@ -85,6 +85,15 @@ int GetTsf(u64 *tsf) {
   // irrelevant here because the pc2drc pipeline carries no audio.
   static bool use_monotonic_fallback = false;
   static u64 monotonic_base = 0;
+  // Enforce a non-decreasing output timeline: clock-source switches
+  // (daemon file appearing/disappearing, torn reads) must never move
+  // timestamps backward, or the GamePad drops video and resync-storms.
+  static u64 last_out = 0;
+  // One video frame interval; used to creep forward when clamping.
+  static const u64 kFrameStepUs = 16683;
+
+  u64 candidate = 0;
+  bool have_candidate = false;
 
   // Preferred source: hardware TSF published by scripts/tsf-daemon.py
   // ("<tsf_us> <mono_ns>", refreshed ~4Hz from the adapter registers).
@@ -106,9 +115,8 @@ int GetTsf(u64 *tsf) {
         u64 now_ns = (u64)now.tv_sec * 1000000000ULL + (u64)now.tv_nsec;
         if (now_ns >= file_mono_ns &&
             now_ns - file_mono_ns < 2000000000ULL && file_tsf != 0) {
-          *tsf = file_tsf + (now_ns - file_mono_ns) / 1000ULL;
-          fclose(f);
-          return 0;
+          candidate = file_tsf + (now_ns - file_mono_ns) / 1000ULL;
+          have_candidate = true;
         }
       }
       fclose(f);
@@ -123,11 +131,9 @@ int GetTsf(u64 *tsf) {
       monotonic_base = mono_us;
     }
     // Keep the epoch small like a real TSF counter started at boot.
-    *tsf = mono_us - monotonic_base;
-    return 0;
-  }
-
-  if (fd == -1) {
+    candidate = mono_us - monotonic_base;
+    have_candidate = true;
+  } else if (fd == -1) {
     std::string drc_if;
 
     if (GetInterfaceOfIpv4("192.168.1.10", &drc_if) == 0) {
@@ -148,8 +154,27 @@ int GetTsf(u64 *tsf) {
       return GetTsf(tsf);
     }
   }
-  if (pread(fd, tsf, sizeof (*tsf), 0) != sizeof (*tsf)) {
-    perror("pread failed - GetTsf");
+
+  if (!have_candidate && fd != -1) {
+    u64 sys_tsf = 0;
+    if (pread(fd, &sys_tsf, sizeof (sys_tsf), 0) != sizeof (sys_tsf)) {
+      perror("pread failed - GetTsf");
+    } else {
+      candidate = sys_tsf;
+      have_candidate = true;
+    }
+  }
+
+  if (have_candidate) {
+    // Never move backward: clamp small regressions to one frame step
+    // forward so a source flap can never produce the timestamp jumps
+    // that make the GamePad drop video and resync-storm.
+    if (last_out != 0 && candidate < last_out &&
+        last_out - candidate < 0x80000000ULL) {
+      candidate = last_out + kFrameStepUs;
+    }
+    *tsf = candidate;
+    last_out = candidate;
   }
   return 0;
 }
