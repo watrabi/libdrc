@@ -174,7 +174,10 @@ void VideoStreamer::InitEventsAndRun() {
   bool send_idr = false;
 
   AstrmPacket astrm_packet;
-  s32 next_timestamp = GetTimestamp();
+  // Unsigned: TSF-derived timestamps wrap every ~71min; wrapping
+  // subtraction keeps pacing correct across the wrap, while signed s32
+  // would overflow (UB) ~36min after firmware boot and collapse pacing.
+  u32 next_timestamp = static_cast<u32>(GetTimestamp());
   TimerEvent* timer_evt = NewTimerEvent(1, [&](Event*) {
     if (vstrm_inited) {
       astrm_client_->Send(astrm_packet.GetBytes(), astrm_packet.GetSize());
@@ -187,7 +190,7 @@ void VideoStreamer::InitEventsAndRun() {
       }
     }
 
-    s32 timestamp = GetTimestamp();
+    u32 timestamp = static_cast<u32>(GetTimestamp());
     LatchOnCurrentFrame(&encoding_frame);
     if (encoding_frame.size() > 0) {
       send_idr = resync_requested || !vstrm_inited;
@@ -200,9 +203,11 @@ void VideoStreamer::InitEventsAndRun() {
       resync_requested = false;
     }
 
-    timestamp = GetTimestamp();
-    next_timestamp += static_cast<s32>(1000000.0/59.94);
-    s32 delta_next = next_timestamp - timestamp;
+    timestamp = static_cast<u32>(GetTimestamp());
+    next_timestamp += static_cast<u32>(1000000.0/59.94);
+    // Wrapping subtraction: correct across the ~71min TSF wrap as long as
+    // the two timestamps are less than 2^31 apart (always true here).
+    u32 delta_next = next_timestamp - timestamp;
     if (delta_next < 1000) {
       delta_next = 1000;
     }

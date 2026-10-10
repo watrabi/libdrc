@@ -22,7 +22,9 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
 
+#include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <drc/internal/audio-streamer.h>
 #include <drc/internal/cmd-protocol.h>
 #include <drc/internal/device-config.h>
@@ -86,10 +88,38 @@ Streamer::~Streamer() {
 }
 
 bool Streamer::Start() {
+  // Diagnostic counters for the MSG channel (stderr, ~1Hz summaries).
+  // The GamePad sends 4-byte packets here constantly; libdrc treats
+  // {0x01,0,0,0} as a video resync request. Anything else is logged so
+  // unknown GamePad messages are visible instead of silently ignored.
+  static u64 msg_total = 0;
+  static u64 msg_resync = 0;
+  static u64 msg_other = 0;
+  static u64 msg_last_report = 0;
   msg_server_->SetReceiveCallback(
       [=](const std::vector<byte>& msg) {
+        struct timespec now_ts;
+        clock_gettime(CLOCK_MONOTONIC, &now_ts);
+        u64 now_us =
+            (u64)now_ts.tv_sec * 1000000ULL + (u64)now_ts.tv_nsec / 1000ULL;
+        msg_total++;
         if (msg.size() == 4 && !memcmp(msg.data(), "\1\0\0\0", 4)) {
+          msg_resync++;
           vid_streamer_->ResyncStream();
+        } else {
+          msg_other++;
+          fprintf(stderr, "MSG: %zu bytes:", msg.size());
+          for (size_t i = 0; i < msg.size() && i < 16; ++i) {
+            fprintf(stderr, " %02x", msg.data()[i]);
+          }
+          fprintf(stderr, "\n");
+        }
+        if (now_us - msg_last_report > 5000000ULL) {
+          fprintf(stderr, "MSG: total=%llu resync=%llu other=%llu\n",
+                  (unsigned long long)msg_total,
+                  (unsigned long long)msg_resync,
+                  (unsigned long long)msg_other);
+          msg_last_report = now_us;
         }
       });
 
