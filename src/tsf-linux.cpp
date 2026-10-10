@@ -26,6 +26,8 @@
 #include <fcntl.h>
 #include <ifaddrs.h>
 #include <netdb.h>
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -83,6 +85,35 @@ int GetTsf(u64 *tsf) {
   // irrelevant here because the pc2drc pipeline carries no audio.
   static bool use_monotonic_fallback = false;
   static u64 monotonic_base = 0;
+
+  // Preferred source: hardware TSF published by scripts/tsf-daemon.py
+  // ("<tsf_us> <mono_ns>", refreshed ~4Hz from the adapter registers).
+  // This keeps video timestamps in the real console-TSF domain that the
+  // GamePad synchronizes to from our beacons. Stale (>2s) files are
+  // ignored so a dead daemon degrades to the monotonic fallback below.
+  {
+    const char* tsf_file = getenv("DRC_TSF_FILE");
+    if (!tsf_file) {
+      tsf_file = "/tmp/wiiu-pair/tsf";
+    }
+    FILE* f = fopen(tsf_file, "r");
+    if (f) {
+      u64 file_tsf = 0;
+      u64 file_mono_ns = 0;
+      if (fscanf(f, "%llu %llu", &file_tsf, &file_mono_ns) == 2) {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        u64 now_ns = (u64)now.tv_sec * 1000000000ULL + (u64)now.tv_nsec;
+        if (now_ns >= file_mono_ns &&
+            now_ns - file_mono_ns < 2000000000ULL && file_tsf != 0) {
+          *tsf = file_tsf + (now_ns - file_mono_ns) / 1000ULL;
+          fclose(f);
+          return 0;
+        }
+      }
+      fclose(f);
+    }
+  }
 
   if (use_monotonic_fallback) {
     struct timespec now;
