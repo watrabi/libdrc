@@ -174,6 +174,13 @@ void VideoStreamer::InitEventsAndRun() {
   bool send_idr = false;
 
   AstrmPacket astrm_packet;
+  // Minimum microseconds between forced IDRs. The GamePad requests a
+  // resync on nearly every frame; answering each one turns the stream
+  // into back-to-back IDRs at ~60Hz, which can overwhelm the link and
+  // the GamePad decoder (streaking/freeze spiral). Cap forced IDRs and
+  // let intra-refresh heal ordinary loss in between.
+  u32 last_idr_timestamp = 0;
+  const u32 kMinIdrIntervalUs = 250000;
   // Unsigned: TSF-derived timestamps wrap every ~71min; wrapping
   // subtraction keeps pacing correct across the wrap, while signed s32
   // would overflow (UB) ~36min after firmware boot and collapse pacing.
@@ -193,7 +200,12 @@ void VideoStreamer::InitEventsAndRun() {
     u32 timestamp = static_cast<u32>(GetTimestamp());
     LatchOnCurrentFrame(&encoding_frame);
     if (encoding_frame.size() > 0) {
-      send_idr = resync_requested || !vstrm_inited;
+      send_idr = !vstrm_inited ||
+                 (resync_requested &&
+                  timestamp - last_idr_timestamp >= kMinIdrIntervalUs);
+      if (send_idr) {
+        last_idr_timestamp = timestamp;
+      }
       const H264ChunkArray& chunks = encoder_->Encode(encoding_frame, send_idr);
       GenerateVstrmPackets(&vstrm_packets, chunks, timestamp, send_idr,
                            &vstrm_inited, &vstrm_seqid);
@@ -210,6 +222,15 @@ void VideoStreamer::InitEventsAndRun() {
     u32 delta_next = next_timestamp - timestamp;
     if (delta_next < 1000) {
       delta_next = 1000;
+    }
+    // The TSF source can jump domains (daemon hiccup, stale file,
+    // adapter reset): a huge forward delta would stall video for
+    // minutes/hours. Clamp and rebase instead, and log it.
+    if (delta_next > 100000) {
+      fprintf(stderr, "VIDEO: pacing jump detected (delta=%u us), rebasing\n",
+              delta_next);
+      next_timestamp = timestamp;
+      delta_next = static_cast<u32>(1000000.0 / 59.94);
     }
     timer_evt->RearmTimer((u64)delta_next * 1000);
 
